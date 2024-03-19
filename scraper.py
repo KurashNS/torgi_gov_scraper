@@ -66,7 +66,7 @@ class TorgiScraper:
 			'Начальная цена': '',
 			'Номер извещения': '',
 			'Категория имущества': '',
-			'VIN номер': '',
+			'VIN': '',
 			'Марка': '',
 			'Модель': '',
 			'Год выпуска': '',
@@ -78,7 +78,8 @@ class TorgiScraper:
 			'Мощность двигателя': '',
 			'Коробка передач': '',
 			'Привод': '',
-			'Экологический класс': ''
+			'Экологический класс': '',
+			'Статус проверки': 'Успешно'
 		}
 
 	@retry(retry=retry_if_exception_type((ProxyError, ProxyConnectionError, ProxyTimeoutError, ClientError)),
@@ -99,15 +100,59 @@ class TorgiScraper:
 		# async with ProxyConnector(proxy_type=ProxyType.HTTP, host='94.103.188.163', port='13811',
 		#                           username='yfy5n4', password='s4SsUv') as proxy_conn:
 		proxy_conn = TCPConnector()
-		async with ClientSession(headers=self._headers, raise_for_status=True, connector=proxy_conn) as session:
+		async with ClientSession(connector=proxy_conn, headers=self._headers, raise_for_status=True) as session:
 			async with session.get(url=self._url, params=search_params) as check_response:
 				return await check_response.text()
+
+	@staticmethod
+	def _process_item_description(item_description: BeautifulSoup) -> dict[str: str]:
+		item_description_dict = {}
+		columns_flag = False
+		for bold_element in item_description.find_all(name='b'):
+			element_text = bold_element.get_text(strip=True)
+			if columns_flag and 'Характеристики' not in element_text:
+				key = element_text[:-1]
+				item_description_dict[key] = ''
+
+			if 'Список лотов' in element_text:
+				columns_flag = True
+
+		item_desc_strings = list(item_description.stripped_strings)
+		for key in item_description_dict:
+			for idx, string in enumerate(item_desc_strings):
+				if key in string:
+					key_value = item_desc_strings[idx + 1]
+					item_description_dict[key] = key_value if key_value[:-1] not in item_description_dict else ''
+					break
+
+		characteristics_flag = False
+		for string in item_desc_strings:
+			if characteristics_flag:
+				key, value = string.split(':', 1)
+				item_description_dict[key.strip()] = value.strip()
+			if 'Характеристики' in string:
+				characteristics_flag = True
+
+		for key in item_description_dict:
+			if 'Дата' in key:
+				if item_description_dict[key] and isinstance(item_description_dict[key], str):
+					try:
+						datetime_obj = datetime.strptime(item_description_dict[key], '%Y-%m-%dT%H:%M:%S.%fZ')
+						item_description_dict[key] = datetime_obj.strftime('%d.%m.%Y %H:%M:%S')
+					except ValueError:
+						pass
+
+		return item_description_dict
 
 	def _process_check_response(self, vin: str, check_response: str) -> dict[str: str]:
 		check_response_xml = BeautifulSoup(markup=check_response, features='lxml-xml')
 		item = check_response_xml.find(name='item')
 		if not item or vin not in item.get_text():
-			raise ValueError('Vehicle was not found at the auction')
+			self._logger.info(f'VIN: {vin} | Vehicle was not found at the auction')
+			check_results = self._check_result_template
+			check_results['VIN'] = vin
+			check_results['Статус проверки'] = 'Нет данных'
+			return check_results
 
 		item_desc_element = item.find(name='description')
 		if not item_desc_element:
@@ -117,49 +162,16 @@ class TorgiScraper:
 		item_desc_html = BeautifulSoup(markup=item_desc, features='html.parser')
 		self._logger.info(f'VIN: {vin} | Item description: {item_desc}')
 
-		check_results = {}
-		columns_flag = False
-		for bold_element in item_desc_html.find_all(name='b'):
-			element_text = bold_element.get_text(strip=True)
-			if columns_flag and 'Характеристики' not in element_text:
-				key = element_text[:-1]
-				check_results[key] = ''
+		item_desc_dict = self._process_item_description(item_description=item_desc_html)
+		check_results = self._check_result_template
+		for results_dict_key in check_results:
+			for item_desc_dict_key in item_desc_dict:
+				if results_dict_key in item_desc_dict_key and item_desc_dict[item_desc_dict_key]:
+					check_results[results_dict_key] = item_desc_dict[item_desc_dict_key]
 
-			if 'Список лотов' in element_text:
-				columns_flag = True
-
-		item_desc_strings = list(item_desc_html.stripped_strings)
-		for key in check_results:
-			for idx, string in enumerate(item_desc_strings):
-				if key in string:
-					key_value = item_desc_strings[idx + 1]
-					check_results[key] = key_value if key_value[:-1] not in check_results else ''
-					break
-
-		characteristics_flag = False
-		for string in item_desc_strings:
-			if characteristics_flag:
-				key, value = string.split(':', 1)
-				check_results[key.strip()] = value.strip()
-			if 'Характеристики' in string:
-				characteristics_flag = True
-
-		for key in check_results:
-			if 'Дата' in key:
-				if check_results[key] and isinstance(check_results[key], str):
-					try:
-						datetime_obj = datetime.strptime(check_results[key], '%Y-%m-%dT%H:%M:%S.%fZ')
-						check_results[key] = datetime_obj.strftime('%d.%m.%Y %H:%M:%S')
-					except ValueError:
-						pass
-
-		results_dict = self._check_result_template
-		for results_dict_key in results_dict:
-			for check_results_key in check_results:
-				if results_dict_key in check_results_key:
-					results_dict[results_dict_key] = check_results[check_results_key]
-
-		return results_dict
+		self._logger.info(f'VIN: {vin} | Check result: {check_results}')
+		print(f'VIN: {vin} | Check result: {check_results}')
+		return check_results
 
 	def _output_check_result(self, check_result: dict[str: str]) -> None:
 		with self._thread_lock:
@@ -184,17 +196,17 @@ class TorgiScraper:
 			wb.save(filename=self._output_file)
 
 	async def check_vehicle(self, vin: str):
-		try:
-			async with self._semaphore:
+		async with self._semaphore:
+			try:
 				check_response = await self._make_check_request(vin=vin)
-
 				check_result = await asyncio.to_thread(self._process_check_response, vin=vin, check_response=check_response)
-				self._logger.info(f'VIN: {vin} | Check result: {check_result}')
-				print(f'VIN: {vin} | Check result: {check_result}')
-
+			except Exception as e:
+				check_result = self._check_result_template
+				check_result['VIN'] = vin
+				check_result['Статус проверки'] = 'Ошибка'
+				self._logger.error(f'VIN: {vin} | Error: {type(e)} - {e}')
+			finally:
 				await asyncio.to_thread(self._output_check_result, check_result=check_result)
-		except Exception as e:
-			self._logger.error(f'VIN: {vin} | Error: {type(e)} - {e}')
 
 
 if __name__ == '__main__':
