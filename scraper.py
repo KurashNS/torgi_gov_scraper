@@ -56,7 +56,7 @@ class TorgiScraper:
 	def _check_result_template(self) -> dict[str: str]:
 		return {
 			'Номер лота': '',
-			'Наименование лота(предмет торгов)': '',
+			'Наименование лота': '',
 			'Вид торгов': '',
 			'Форма проведения торгов': '',
 			'Статус лота': '',
@@ -189,8 +189,8 @@ class TorgiScraper:
 				check_response = await self._make_check_request(vin=vin)
 
 				check_result = await asyncio.to_thread(self._process_check_response, vin=vin, check_response=check_response)
-				self._logger.info(f'VIN: {vin} | Check result: {results_dict}')
-				print(f'VIN: {vin} | Check result: {results_dict}')
+				self._logger.info(f'VIN: {vin} | Check result: {check_result}')
+				print(f'VIN: {vin} | Check result: {check_result}')
 
 				await asyncio.to_thread(self._output_check_result, check_result=check_result)
 		except Exception as e:
