@@ -199,7 +199,12 @@ class TorgiScraper:
 					log_level=ERROR
 				)
 			finally:
-				await asyncio.to_thread(output_check_result, output_file=self._output_file, check_result=check_results)
+				try:
+					await asyncio.to_thread(output_check_result, output_file=self._output_file, check_result=check_results)
+				except Exception as e:
+					self._logger.error(
+						f'VIN: {vin} | Failed to output check results: {type(e)} - {e} | Check results: {check_results}'
+					)
 
 
 if __name__ == '__main__':
