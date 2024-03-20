@@ -1,37 +1,29 @@
-from datetime import datetime
-
-from logging import Logger
-from log import TorgiLogger
-
-import asyncio
-import threading
-
 import ua_generator
 from aiohttp_socks import ProxyConnector, ProxyType, ProxyError, ProxyConnectionError, ProxyTimeoutError
-
 from aiohttp import ClientSession, ClientError, TCPConnector
 
 from tenacity import retry, retry_if_exception_type, wait_random, stop_after_attempt
 
 from bs4 import BeautifulSoup
 
-import pandas as pd
-from openpyxl.utils.dataframe import dataframe_to_rows
+from excel.xlsx_io import output_check_result
 
-from openpyxl.workbook.workbook import Workbook
-from openpyxl import load_workbook
+from datetime import datetime
+
+from logging import Logger, INFO, ERROR
+
+import asyncio
 
 
 class TorgiScraper:
-	def __init__(self, logger: Logger = TorgiLogger()):
+	def __init__(self, logger: Logger):
 		self._url = 'https://torgi.gov.ru/new/api/public/lotcards/rss'
 
-		self._output_file = f'excel/output/check_results_{datetime.now().strftime("%Y-%m-%d_%H-%M-%S")}.xlsx'
+		self._logger = logger
 
 		self._semaphore = asyncio.Semaphore(value=50)
-		self._thread_lock = threading.Lock()
 
-		self._logger = logger
+		self._output_file = f'excel/output/check_results_{datetime.now().strftime("%Y-%m-%d_%H-%M-%S")}.xlsx'
 
 	@property
 	def _headers(self) -> dict[str: str]:
@@ -55,6 +47,8 @@ class TorgiScraper:
 	@property
 	def _check_result_template(self) -> dict[str: str]:
 		return {
+			'VIN': '',
+			'Статус проверки': 'Успешно',
 			'Номер лота': '',
 			'Наименование лота': '',
 			'Вид торгов': '',
@@ -66,7 +60,6 @@ class TorgiScraper:
 			'Начальная цена': '',
 			'Номер извещения': '',
 			'Категория имущества': '',
-			'VIN': '',
 			'Марка': '',
 			'Модель': '',
 			'Год выпуска': '',
@@ -78,8 +71,7 @@ class TorgiScraper:
 			'Мощность двигателя': '',
 			'Коробка передач': '',
 			'Привод': '',
-			'Экологический класс': '',
-			'Статус проверки': 'Успешно'
+			'Экологический класс': ''
 		}
 
 	@retry(retry=retry_if_exception_type((ProxyError, ProxyConnectionError, ProxyTimeoutError, ClientError)),
@@ -144,15 +136,23 @@ class TorgiScraper:
 
 		return item_description_dict
 
+	def _handle_no_vehicle_found(self, vin: str, status: str, log_msg: str, log_level: int):
+		self._logger.log(level=log_level, msg=log_msg)
+		check_results = self._check_result_template.copy()
+		check_results['VIN'] = vin
+		check_results['Статус проверки'] = status
+		return check_results
+
 	def _process_check_response(self, vin: str, check_response: str) -> dict[str: str]:
 		check_response_xml = BeautifulSoup(markup=check_response, features='lxml-xml')
 		item = check_response_xml.find(name='item')
-		if not item or vin not in item.get_text():
-			self._logger.info(f'VIN: {vin} | Vehicle was not found at the auction')
-			check_results = self._check_result_template
-			check_results['VIN'] = vin
-			check_results['Статус проверки'] = 'Нет данных'
-			return check_results
+		if not item:
+			return self._handle_no_vehicle_found(
+				vin=vin,
+				status='Нет данных',
+				log_msg=f'VIN: {vin} | Vehicle was not found at the auction',
+				log_level=INFO
+			)
 
 		item_desc_element = item.find(name='description')
 		if not item_desc_element:
@@ -160,58 +160,56 @@ class TorgiScraper:
 
 		item_desc = item_desc_element.get_text()
 		item_desc_html = BeautifulSoup(markup=item_desc, features='html.parser')
-		self._logger.info(f'VIN: {vin} | Item description: {item_desc}')
 
 		item_desc_dict = self._process_item_description(item_description=item_desc_html)
-		check_results = self._check_result_template
+		check_results = self._check_result_template.copy()
 		for results_dict_key in check_results:
 			for item_desc_dict_key in item_desc_dict:
 				if results_dict_key in item_desc_dict_key and item_desc_dict[item_desc_dict_key]:
 					check_results[results_dict_key] = item_desc_dict[item_desc_dict_key]
 
-		self._logger.info(f'VIN: {vin} | Check result: {check_results}')
-		print(f'VIN: {vin} | Check result: {check_results}')
+		if vin != check_results.get('VIN'):
+			return self._handle_no_vehicle_found(
+				vin=vin,
+				status='Нет данных',
+				log_msg=f'VIN: {vin} | Vehicle was not found at the auction',
+				log_level=INFO
+			)
+		else:
+			self._logger.info(f'VIN: {vin} | Item description: {item_desc}')
+			self._logger.info(f'VIN: {vin} | Check result: {check_results}')
+			print(f'VIN: {vin} | Check result: {check_results}')
+
 		return check_results
-
-	def _output_check_result(self, check_result: dict[str: str]) -> None:
-		with self._thread_lock:
-			try:
-				wb: Workbook = load_workbook(filename=self._output_file)
-				ws = wb.active
-				header = False
-			except FileNotFoundError:
-				wb = Workbook()
-				ws = wb.create_sheet(title='ГИС Торги')
-				header = True
-
-			for row in dataframe_to_rows(df=pd.json_normalize(data=check_result), index=False, header=header):
-				ws.append(row)
-
-			if header:
-				for sheet_name in wb.sheetnames:
-					sheet = wb[sheet_name]
-					if sheet.max_row == 1 and sheet.max_column == 1:
-						wb.remove(sheet)
-
-			wb.save(filename=self._output_file)
 
 	async def check_vehicle(self, vin: str):
 		async with self._semaphore:
 			try:
 				check_response = await self._make_check_request(vin=vin)
-				check_result = await asyncio.to_thread(self._process_check_response, vin=vin, check_response=check_response)
+				check_results = await asyncio.to_thread(
+					self._process_check_response,
+					vin=vin,
+					check_response=check_response
+				)
 			except Exception as e:
-				check_result = self._check_result_template
-				check_result['VIN'] = vin
-				check_result['Статус проверки'] = 'Ошибка'
-				self._logger.error(f'VIN: {vin} | Error: {type(e)} - {e}')
+				check_results = self._handle_no_vehicle_found(
+					vin=vin,
+					status='Ошибка',
+					log_msg=f'VIN: {vin} | Error: {type(e)} - {e}',
+					log_level=ERROR
+				)
 			finally:
-				await asyncio.to_thread(self._output_check_result, check_result=check_result)
+				await asyncio.to_thread(output_check_result, output_file=self._output_file, check_result=check_results)
 
 
 if __name__ == '__main__':
+	from log import TorgiLogger
+
+
 	async def main():
-		torgi_scraper = TorgiScraper()
+		logger = TorgiLogger()
+		torgi_scraper = TorgiScraper(logger=logger)
+
 		vin_list = [
 			'XTAKS045LK1178313',
 			'X9W64408MJ0002729',
@@ -222,7 +220,6 @@ if __name__ == '__main__':
 			'XWEGU411BL0021018',
 			'Z8NBAABD0K0083816'
 		]
-
 		check_tasks = [torgi_scraper.check_vehicle(vin=vin) for vin in vin_list]
 		for check_task in asyncio.as_completed(check_tasks):
 			await check_task

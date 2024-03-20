@@ -1,12 +1,16 @@
 from openpyxl import load_workbook
-from openpyxl.worksheet.worksheet import Worksheet
-
-import re
-
 from openpyxl.workbook.workbook import Workbook
+
+from openpyxl.worksheet.worksheet import Worksheet
 
 import pandas as pd
 from openpyxl.utils.dataframe import dataframe_to_rows
+
+import re
+
+import threading
+
+_thread_lock = threading.Lock()
 
 
 def get_vin_list(input_excel_file: str):
@@ -28,22 +32,23 @@ def get_vin_list(input_excel_file: str):
 
 
 def output_check_result(output_file: str, check_result: dict[str: str]) -> None:
-	try:
-		wb: Workbook = load_workbook(filename=output_file)
-		ws = wb.active
-		header = False
-	except FileNotFoundError:
-		wb = Workbook()
-		ws = wb.create_sheet(title='ГИС Торги')
-		header = True
+	with _thread_lock:
+		try:
+			wb: Workbook = load_workbook(filename=output_file)
+			ws = wb.active
+			header = False
+		except FileNotFoundError:
+			wb = Workbook()
+			ws = wb.create_sheet(title='ГИС Торги')
+			header = True
 
-	for row in dataframe_to_rows(df=pd.json_normalize(data=check_result), index=False, header=header):
-		ws.append(row)
+		for row in dataframe_to_rows(df=pd.json_normalize(data=check_result), index=False, header=header):
+			ws.append(row)
 
-	if header:
-		for sheet_name in wb.sheetnames:
-			sheet = wb[sheet_name]
-			if sheet.max_row == 1 and sheet.max_column == 1:
-				wb.remove(sheet)
+		if header:
+			for sheet_name in wb.sheetnames:
+				sheet = wb[sheet_name]
+				if sheet.max_row == 1 and sheet.max_column == 1:
+					wb.remove(worksheet=sheet)
 
-	wb.save(filename=output_file)
+		wb.save(filename=output_file)
