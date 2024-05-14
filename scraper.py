@@ -75,7 +75,7 @@ class TorgiScraper:
 		}
 
 	@retry(retry=retry_if_exception_type((ProxyError, ProxyConnectionError, ProxyTimeoutError, ClientError)),
-	       sleep=asyncio.sleep, wait=wait_random(min=0, max=1), stop=stop_after_attempt(10), reraise=True)
+	       sleep=asyncio.sleep, wait=wait_random(min=0, max=1), stop=stop_after_attempt(20), reraise=True)
 	async def _make_check_request(self, vin: str) -> str:
 		search_params = {
 			'biddEndFrom': '',
@@ -89,12 +89,11 @@ class TorgiScraper:
 			'npa': '',
 			'byFirstVersion': 'true',
 		}
-		# async with ProxyConnector(proxy_type=ProxyType.HTTP, host='94.103.188.163', port='13811',
-		#                           username='yfy5n4', password='s4SsUv') as proxy_conn:
-		proxy_conn = TCPConnector()
-		async with ClientSession(connector=proxy_conn, headers=self._headers, raise_for_status=True) as session:
-			async with session.get(url=self._url, params=search_params) as check_response:
-				return await check_response.text()
+		async with ProxyConnector(proxy_type=ProxyType.HTTP, host='185.82.126.71', port='13518',
+		                          username='yfy5n4', password='s4SsUv') as proxy_conn:
+			async with ClientSession(connector=proxy_conn, headers=self._headers, raise_for_status=True) as session:
+				async with session.get(url=self._url, params=search_params) as check_response:
+					return await check_response.text()
 
 	@staticmethod
 	def _process_item_description(item_description: BeautifulSoup) -> dict[str: str]:
